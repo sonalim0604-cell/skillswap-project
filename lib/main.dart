@@ -4,10 +4,18 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:share_plus/share_plus.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-import 'supabase_config.dart';
+import 'config/supabase_config.dart';
+import 'models/rating.dart';
+import 'models/request.dart';
+import 'models/session.dart';
+import 'services/auth_service.dart';
+import 'services/message_service.dart';
+import 'services/profile_service.dart';
+import 'services/session_service.dart';
+import 'services/skill_service.dart';
+import 'services/storage_service.dart';
 
 const ink = Color(0xFF252447);
 const purple = Color(0xFF4F35F5);
@@ -19,7 +27,7 @@ const muted = Color(0xFF777990);
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  await Supabase.initialize(url: supabaseUrl, anonKey: supabaseAnonKey);
+  await initializeSupabase();
 
   runApp(const SkillSwapApp());
 }
@@ -75,84 +83,12 @@ class _SkillSwapAppState extends State<SkillSwapApp> {
   }
 }
 
-enum SessionStatus { upcoming, completed, cancelled }
-
-enum ExchangeDirection { taught, learned }
-
-enum SessionMode { inPerson, video }
-
-class DemoSession {
-  DemoSession({
-    required this.id,
-    required this.partner,
-    required this.skill,
-    required this.date,
-    required this.status,
-    required this.direction,
-    this.time = '2:00 PM',
-    this.place = 'Library study lounge',
-    this.mode = SessionMode.inPerson,
-    this.note = '',
-    this.durationMinutes = 60,
-    this.isScheduled = true,
-    this.swapRequestId,
-    this.partnerId,
-    this.databaseId,
-  });
-  final String id;
-  final String partner;
-  final String skill;
-  String date;
-  String time;
-  String place;
-  SessionMode mode;
-  String note;
-  int durationMinutes;
-  bool isScheduled;
-  final String? swapRequestId;
-  final String? partnerId;
-  String? databaseId;
-  SessionStatus status;
-  final ExchangeDirection direction;
-
-  String get meetingLink => 'https://meet.jit.si/SkillSwap-${databaseId ?? id}';
-}
-
-class DemoRequest {
-  DemoRequest({
-    required this.name,
-    required this.skill,
-    required this.incoming,
-    this.status = 'Pending',
-    this.requestId,
-    this.partnerId,
-  });
-  final String name;
-  final String skill;
-  final bool incoming;
-  final String? requestId;
-  final String? partnerId;
-  String status;
-}
-
-class DemoRating {
-  DemoRating({
-    required this.sessionId,
-    required this.partner,
-    required this.skill,
-    required this.stars,
-    required this.review,
-    required this.date,
-  });
-  final String sessionId;
-  final String partner;
-  final String skill;
-  final int stars;
-  final String review;
-  final String date;
-}
-
 class DemoState extends ChangeNotifier {
+  final _authService = AuthService();
+  final _profileService = ProfileService();
+  final _skillService = SkillService();
+  final _sessionService = SessionService();
+
   String name = 'Maya Kapoor';
   String college = 'Northview College';
   String? avatarUrl;
@@ -285,18 +221,15 @@ class DemoState extends ChangeNotifier {
   }
 
   Future<void> loadSkills(BuildContext context) async {
-    final userId = Supabase.instance.client.auth.currentUser?.id;
+    final userId = _authService.currentUserId;
     if (userId == null) return;
     try {
-      final rows = await Supabase.instance.client
-          .from('user_skills')
-          .select('skill_id, skill_type, skills(skill_name)')
-          .eq('user_id', userId);
+      final rows = await _skillService.fetchUserSkills(userId);
       if (!context.mounted) return;
       final teach = <String>[];
       final learn = <String>[];
       final loadedSkillIds = <String, int>{};
-      for (final row in List<Map<String, dynamic>>.from(rows)) {
+      for (final row in rows) {
         final skillRow = row['skills'] as Map<String, dynamic>?;
         final skillName = skillRow?['skill_name']?.toString().trim() ?? '';
         if (skillName.isEmpty) continue;
@@ -327,14 +260,10 @@ class DemoState extends ChangeNotifier {
   }
 
   Future<void> loadUserProfile(BuildContext context) async {
-    final userId = Supabase.instance.client.auth.currentUser?.id;
+    final userId = _authService.currentUserId;
     if (userId == null) return;
     try {
-      final profile = await Supabase.instance.client
-          .from('profiles')
-          .select('full_name, avatar_url')
-          .eq('id', userId)
-          .maybeSingle();
+      final profile = await _profileService.fetchProfile(userId);
       if (!context.mounted || profile == null) return;
       final fullName = profile['full_name']?.toString().trim() ?? '';
       name = fullName.isEmpty ? name : fullName;
@@ -368,46 +297,14 @@ class DemoState extends ChangeNotifier {
   }
 
   Future<void> loadSessions(BuildContext context) async {
-    final userId = Supabase.instance.client.auth.currentUser?.id;
+    final userId = _authService.currentUserId;
     if (userId == null) return;
     try {
-      final sessionRows = List<Map<String, dynamic>>.from(
-        await Supabase.instance.client
-            .from('sessions')
-            .select(
-              'id, swap_request_id, partner_id, skill, scheduled_at, '
-              'duration_minutes, mode, place, note, status',
-            ),
-      );
+      final data = await _sessionService.fetchSessions();
+      final sessionRows = data.sessionRows;
       if (sessionRows.isEmpty) return;
-      final requestIds = sessionRows
-          .map((row) => row['swap_request_id'].toString())
-          .toSet()
-          .toList();
-      final requestRows = List<Map<String, dynamic>>.from(
-        await Supabase.instance.client
-            .from('swap_requests')
-            .select('id, requester_id, recipient_id')
-            .inFilter('id', requestIds),
-      );
-      final requestById = {
-        for (final row in requestRows) row['id'].toString(): row,
-      };
-      final partnerIds = sessionRows
-          .map((row) => row['partner_id'].toString())
-          .toSet()
-          .toList();
-      final profiles = partnerIds.isEmpty
-          ? <Map<String, dynamic>>[]
-          : List<Map<String, dynamic>>.from(
-              await Supabase.instance.client
-                  .from('profiles')
-                  .select('id, full_name, username')
-                  .inFilter('id', partnerIds),
-            );
-      final profileById = {
-        for (final row in profiles) row['id'].toString(): row,
-      };
+      final requestById = data.requestById;
+      final profileById = data.profileById;
       if (!context.mounted) return;
       for (final row in sessionRows) {
         final requestId = row['swap_request_id'].toString();
@@ -492,23 +389,19 @@ class DemoState extends ChangeNotifier {
       time.minute,
     );
     try {
-      final result = await Supabase.instance.client
-          .from('sessions')
-          .upsert({
-            'swap_request_id': requestId,
-            'partner_id': partnerId,
-            'skill': session.skill,
-            'scheduled_at': dateTime.toUtc().toIso8601String(),
-            'duration_minutes': session.durationMinutes,
-            'mode': session.mode == SessionMode.video ? 'video' : 'in_person',
-            'place': session.mode == SessionMode.video ? null : session.place,
-            'note': session.note,
-            'status': _sessionStatusValue(session.status),
-          }, onConflict: 'swap_request_id')
-          .select('id')
-          .single();
+      final databaseId = await _sessionService.saveSession(
+        requestId: requestId,
+        partnerId: partnerId,
+        skill: session.skill,
+        scheduledAt: dateTime.toUtc().toIso8601String(),
+        durationMinutes: session.durationMinutes,
+        mode: session.mode == SessionMode.video ? 'video' : 'in_person',
+        place: session.mode == SessionMode.video ? null : session.place,
+        note: session.note,
+        status: _sessionStatusValue(session.status),
+      );
       if (!context.mounted) return;
-      session.databaseId = result['id']?.toString();
+      session.databaseId = databaseId;
     } catch (error) {
       if (context.mounted) {
         showMessage(context, 'Session saved on this device only: $error');
@@ -587,6 +480,7 @@ class _LoginPageState extends State<LoginPage> {
   final password = TextEditingController();
   bool hidePassword = true;
   bool signingIn = false;
+  final authService = AuthService();
 
   @override
   void dispose() {
@@ -599,7 +493,7 @@ class _LoginPageState extends State<LoginPage> {
     if (!form.currentState!.validate() || signingIn) return;
     setState(() => signingIn = true);
     try {
-      await Supabase.instance.client.auth.signInWithPassword(
+      await authService.signInWithPassword(
         email: email.text.trim(),
         password: password.text,
       );
@@ -608,7 +502,7 @@ class _LoginPageState extends State<LoginPage> {
         MaterialPageRoute(builder: (_) => MainShell(app: widget.app)),
         (_) => false,
       );
-    } on AuthException catch (error) {
+    } on AuthServiceException catch (error) {
       if (mounted) showMessage(context, 'Sign in failed: ${error.message}');
     } catch (error) {
       if (mounted) showMessage(context, 'Unable to sign in: $error');
@@ -746,6 +640,7 @@ class _SignUpPageState extends State<SignUpPage> {
   final confirm = TextEditingController();
   bool hide = true;
   bool creatingAccount = false;
+  final authService = AuthService();
 
   @override
   void dispose() {
@@ -761,13 +656,13 @@ class _SignUpPageState extends State<SignUpPage> {
     setState(() => creatingAccount = true);
 
     try {
-      final response = await Supabase.instance.client.auth.signUp(
+      final created = await authService.signUp(
         email: email.text.trim(),
         password: password.text,
-        data: {'full_name': name.text.trim()},
+        fullName: name.text.trim(),
       );
 
-      if (response.user == null) {
+      if (!created) {
         throw Exception('Account creation failed.');
       }
 
@@ -791,7 +686,7 @@ class _SignUpPageState extends State<SignUpPage> {
           ],
         ),
       );
-    } on AuthException catch (error) {
+    } on AuthServiceException catch (error) {
       if (!mounted) return;
       if (error.code == 'user_already_exists') {
         showDialog<void>(
@@ -2468,6 +2363,8 @@ class ChatPage extends StatefulWidget {
 class _ChatPageState extends State<ChatPage> {
   final messageController = TextEditingController();
   final scrollController = ScrollController();
+  final authService = AuthService();
+  final messageService = MessageService();
   final messages = <Map<String, dynamic>>[];
   StreamSubscription<List<Map<String, dynamic>>>? messageSubscription;
   String? myId;
@@ -2498,17 +2395,12 @@ class _ChatPageState extends State<ChatPage> {
     }
 
     try {
-      final client = Supabase.instance.client;
-      if (client.auth.currentUser == null) {
+      final userId = authService.currentUserId;
+      if (userId == null) {
         throw StateError('Please sign in again to view messages.');
       }
-      final userId = client.auth.currentUser!.id;
       final requestId = widget.swapRequestId!;
-      final history = await client
-          .from('messages')
-          .select()
-          .eq('swap_request_id', requestId)
-          .order('created_at');
+      final history = await messageService.fetchHistory(requestId);
       if (!mounted) return;
       setState(() {
         myId = userId;
@@ -2519,11 +2411,8 @@ class _ChatPageState extends State<ChatPage> {
       });
       scrollToLatest();
 
-      messageSubscription = client
-          .from('messages')
-          .stream(primaryKey: ['id'])
-          .eq('swap_request_id', requestId)
-          .order('created_at')
+      messageSubscription = messageService
+          .watchMessages(requestId)
           .listen(
             (rows) {
               if (!mounted) return;
@@ -2560,16 +2449,15 @@ class _ChatPageState extends State<ChatPage> {
     if (text.isEmpty || sending || !hasConversation) return;
     setState(() => sending = true);
     try {
-      final client = Supabase.instance.client;
-      if (client.auth.currentUser == null) {
+      final userId = authService.currentUserId;
+      if (userId == null) {
         throw StateError('Please sign in again to send messages.');
       }
-      final userId = client.auth.currentUser!.id;
-      await client.from('messages').insert({
-        'swap_request_id': widget.swapRequestId,
-        'sender_id': userId,
-        'message_text': text,
-      });
+      await messageService.sendMessage(
+        requestId: widget.swapRequestId!,
+        userId: userId,
+        text: text,
+      );
       if (!mounted) return;
       messageController.clear();
       FocusScope.of(context).unfocus();
@@ -2764,6 +2652,8 @@ class MessagesPage extends StatefulWidget {
 }
 
 class _MessagesPageState extends State<MessagesPage> {
+  final authService = AuthService();
+  final messageService = MessageService();
   bool loading = true;
   List<_ConversationSummary> conversations = [];
 
@@ -2775,17 +2665,11 @@ class _MessagesPageState extends State<MessagesPage> {
 
   Future<void> loadConversations() async {
     try {
-      final client = Supabase.instance.client;
-      if (client.auth.currentUser == null) {
+      final myId = authService.currentUserId;
+      if (myId == null) {
         throw StateError('Please sign in again to view conversations.');
       }
-      final myId = client.auth.currentUser!.id;
-      final messageRows = List<Map<String, dynamic>>.from(
-        await client
-            .from('messages')
-            .select('swap_request_id, sender_id, message_text, created_at')
-            .order('created_at'),
-      );
+      final messageRows = await messageService.fetchConversationMessages();
       final grouped = <String, List<Map<String, dynamic>>>{};
       for (final row in messageRows) {
         final requestId = row['swap_request_id']?.toString();
@@ -2798,12 +2682,7 @@ class _MessagesPageState extends State<MessagesPage> {
         if (mounted) setState(() => loading = false);
         return;
       }
-      final requestRows = List<Map<String, dynamic>>.from(
-        await client
-            .from('swap_requests')
-            .select('id, requester_id, recipient_id')
-            .inFilter('id', requestIds),
-      );
+      final requestRows = await messageService.fetchRequests(requestIds);
       final requestById = {
         for (final row in requestRows) row['id'].toString(): row,
       };
@@ -2814,14 +2693,7 @@ class _MessagesPageState extends State<MessagesPage> {
         if (requesterId == myId) partnerIds.add(recipientId);
         if (recipientId == myId) partnerIds.add(requesterId);
       }
-      final profiles = partnerIds.isEmpty
-          ? <Map<String, dynamic>>[]
-          : List<Map<String, dynamic>>.from(
-              await client
-                  .from('profiles')
-                  .select('id, full_name, username')
-                  .inFilter('id', partnerIds.toList()),
-            );
+      final profiles = await messageService.fetchProfiles(partnerIds.toList());
       final profileById = {
         for (final profile in profiles) profile['id'].toString(): profile,
       };
@@ -3034,6 +2906,9 @@ class SkillsPage extends StatefulWidget {
 }
 
 class _SkillsPageState extends State<SkillsPage> {
+  final authService = AuthService();
+  final skillService = SkillService();
+
   void addSkill(bool teach) {
     final controller = TextEditingController();
     showDialog<void>(
@@ -3073,48 +2948,20 @@ class _SkillsPageState extends State<SkillsPage> {
                   error = null;
                 });
                 try {
-                  final client = Supabase.instance.client;
-                  final userId = client.auth.currentUser?.id;
+                  final userId = authService.currentUserId;
                   if (userId == null) {
                     throw StateError(
                       'Sign in to sync skills with your account.',
                     );
                   }
                   final skillKey = value.toLowerCase();
-                  var skillId = widget.app.skillIds[skillKey];
-                  if (skillId == null) {
-                    var row = await client
-                        .from('skills')
-                        .select('id')
-                        .ilike('skill_name', value)
-                        .maybeSingle();
-                    if (!mounted || !dialogContext.mounted) return;
-                    if (row == null) {
-                      row = await client
-                          .from('skills')
-                          .insert({'skill_name': value})
-                          .select('id')
-                          .single();
-                      if (!mounted || !dialogContext.mounted) return;
-                    }
-                    skillId = row['id'] as int;
-                  }
-                  final existing = await client
-                      .from('user_skills')
-                      .select('id')
-                      .eq('user_id', userId)
-                      .eq('skill_id', skillId)
-                      .eq('skill_type', teach ? 'teach' : 'learn')
-                      .maybeSingle();
+                  final skillId = await skillService.addSkill(
+                    userId: userId,
+                    skillName: value,
+                    skillType: teach ? 'teach' : 'learn',
+                    knownSkillId: widget.app.skillIds[skillKey],
+                  );
                   if (!mounted || !dialogContext.mounted) return;
-                  if (existing == null) {
-                    await client.from('user_skills').insert({
-                      'user_id': userId,
-                      'skill_id': skillId,
-                      'skill_type': teach ? 'teach' : 'learn',
-                    });
-                    if (!mounted || !dialogContext.mounted) return;
-                  }
                   widget.app.skillIds[skillKey] = skillId;
                   widget.app.addSkill(value, teach);
                   Navigator.pop(dialogContext);
@@ -3195,28 +3042,16 @@ class _SkillsPageState extends State<SkillsPage> {
   Future<void> removeSkill(String skill, bool teach) async {
     widget.app.removeSkill(skill, teach);
     try {
-      final client = Supabase.instance.client;
-      final userId = client.auth.currentUser?.id;
+      final userId = authService.currentUserId;
       if (userId == null) {
         throw StateError('Sign in to sync skill changes with your account.');
       }
-      var skillId = widget.app.skillIds[skill.toLowerCase()];
-      if (skillId == null) {
-        final row = await client
-            .from('skills')
-            .select('id')
-            .ilike('skill_name', skill)
-            .maybeSingle();
-        if (!mounted) return;
-        skillId = row?['id'] as int?;
-      }
-      if (skillId == null) return;
-      await client
-          .from('user_skills')
-          .delete()
-          .eq('user_id', userId)
-          .eq('skill_id', skillId)
-          .eq('skill_type', teach ? 'teach' : 'learn');
+      await skillService.removeSkill(
+        userId: userId,
+        skillName: skill,
+        skillType: teach ? 'teach' : 'learn',
+        knownSkillId: widget.app.skillIds[skill.toLowerCase()],
+      );
     } catch (error) {
       if (mounted) {
         showMessage(
@@ -3378,6 +3213,10 @@ class _ProfilePageState extends State<ProfilePage> {
   late final bio = TextEditingController(text: widget.app.bio);
   bool signingOut = false;
   bool uploadingAvatar = false;
+  final authService = AuthService();
+  final profileService = ProfileService();
+  final storageService = StorageService();
+
   @override
   void dispose() {
     name.dispose();
@@ -3397,7 +3236,7 @@ class _ProfilePageState extends State<ProfilePage> {
     if (signingOut) return;
     setState(() => signingOut = true);
     try {
-      await Supabase.instance.client.auth.signOut();
+      await authService.signOut();
       if (!mounted) return;
       Navigator.of(context).pushAndRemoveUntil(
         MaterialPageRoute(builder: (_) => LoginPage(app: widget.app)),
@@ -3440,7 +3279,7 @@ class _ProfilePageState extends State<ProfilePage> {
         imageQuality: 80,
       );
       if (!mounted || image == null) return;
-      final userId = Supabase.instance.client.auth.currentUser?.id;
+      final userId = authService.currentUserId;
       if (userId == null) {
         showMessage(context, 'Sign in again before uploading a profile photo.');
         return;
@@ -3448,24 +3287,11 @@ class _ProfilePageState extends State<ProfilePage> {
       setState(() => uploadingAvatar = true);
       final bytes = await image.readAsBytes();
       if (!mounted) return;
-      final client = Supabase.instance.client;
-      final objectPath = '$userId/avatar.jpg';
-      await client.storage
-          .from('avatars')
-          .uploadBinary(
-            objectPath,
-            bytes,
-            fileOptions: const FileOptions(
-              upsert: true,
-              contentType: 'image/jpeg',
-            ),
-          );
-      if (!mounted) return;
-      final publicUrl = client.storage.from('avatars').getPublicUrl(objectPath);
-      await client
-          .from('profiles')
-          .update({'avatar_url': publicUrl})
-          .eq('id', userId);
+      final publicUrl = await storageService.uploadProfilePicture(
+        userId: userId,
+        bytes: bytes,
+      );
+      await profileService.updateAvatarUrl(userId, publicUrl);
       if (!mounted) return;
       widget.app.updateAvatarUrl(publicUrl);
       showMessage(context, 'Profile photo updated.');
